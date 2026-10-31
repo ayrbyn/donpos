@@ -5,19 +5,25 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.deps import get_current_user, require_roles
+from app.api.deps import get_current_outlet, get_current_user, require_roles
 from app.db.session import get_db
 from app.models.category import Category
+from app.models.product import Product
+from app.models.outlet import Outlet
 from app.models.user import User
 from app.schemas.category import CategoryCreate, CategoryOut, CategoryUpdate
 
 router = APIRouter(prefix="/categories", tags=["categories"])
 
 
-async def get_category_or_404(db: AsyncSession, category_id: uuid.UUID) -> Category:
+async def get_category_or_404(
+    db: AsyncSession, category_id: uuid.UUID, outlet_id: uuid.UUID
+) -> Category:
     result = await db.execute(
         select(Category).where(
-            Category.id == category_id, Category.deleted_at.is_(None)
+            Category.id == category_id,
+            Category.outlet_id == outlet_id,
+            Category.deleted_at.is_(None),
         )
     )
     category = result.scalar_one_or_none()
@@ -27,9 +33,14 @@ async def get_category_or_404(db: AsyncSession, category_id: uuid.UUID) -> Categ
 
 
 async def ensure_name_free(
-    db: AsyncSession, name: str, exclude_id: uuid.UUID | None = None
+    db: AsyncSession,
+    name: str,
+    outlet_id: uuid.UUID,
+    exclude_id: uuid.UUID | None = None,
 ) -> None:
-    query = select(Category).where(Category.name == name)
+    query = select(Category).where(
+        Category.name == name, Category.outlet_id == outlet_id
+    )
     if exclude_id is not None:
         query = query.where(Category.id != exclude_id)
     result = await db.execute(query)
@@ -41,9 +52,12 @@ async def ensure_name_free(
 async def list_categories(
     db: AsyncSession = Depends(get_db),
     _: User = Depends(get_current_user),
+    outlet: Outlet = Depends(get_current_outlet),
 ):
     result = await db.execute(
-        select(Category).where(Category.deleted_at.is_(None)).order_by(Category.name)
+        select(Category)
+        .where(Category.deleted_at.is_(None), Category.outlet_id == outlet.id)
+        .order_by(Category.name)
     )
     return result.scalars().all()
 
@@ -53,10 +67,11 @@ async def create_category(
     data: CategoryCreate,
     db: AsyncSession = Depends(get_db),
     _: User = Depends(require_roles("owner", "admin")),
+    outlet: Outlet = Depends(get_current_outlet),
 ):
     name = data.name.strip()
-    await ensure_name_free(db, name)
-    category = Category(name=name)
+    await ensure_name_free(db, name, outlet.id)
+    category = Category(name=name, outlet_id=outlet.id)
     db.add(category)
     await db.commit()
     await db.refresh(category)
@@ -69,10 +84,11 @@ async def update_category(
     data: CategoryUpdate,
     db: AsyncSession = Depends(get_db),
     _: User = Depends(require_roles("owner", "admin")),
+    outlet: Outlet = Depends(get_current_outlet),
 ):
-    category = await get_category_or_404(db, category_id)
+    category = await get_category_or_404(db, category_id, outlet.id)
     name = data.name.strip()
-    await ensure_name_free(db, name, exclude_id=category.id)
+    await ensure_name_free(db, name, outlet.id, exclude_id=category.id)
     category.name = name
     await db.commit()
     await db.refresh(category)
@@ -84,8 +100,34 @@ async def delete_category(
     category_id: uuid.UUID,
     db: AsyncSession = Depends(get_db),
     _: User = Depends(require_roles("owner", "admin")),
+    outlet: Outlet = Depends(get_current_outlet),
 ):
-    category = await get_category_or_404(db, category_id)
+    result = await db.execute(
+        select(Category)
+        .where(
+            Category.id == category_id,
+            Category.outlet_id == outlet.id,
+            Category.deleted_at.is_(None),
+        )
+        .with_for_update()
+    )
+    category = result.scalar_one_or_none()
+    if category is None:
+        raise HTTPException(status_code=404, detail="Kategori tidak ditemukan")
+
+    product_in_use = await db.scalar(
+        select(Product.id)
+        .where(
+            Product.category_id == category_id,
+            Product.outlet_id == outlet.id,
+        )
+        .limit(1)
+    )
+    if product_in_use is not None:
+        raise HTTPException(
+            status_code=400, detail="Kategori masih digunakan oleh produk"
+        )
+
     category.deleted_at = datetime.now(timezone.utc)
     category.name = f"{category.name}__dihapus__{category.id}"
     await db.commit()

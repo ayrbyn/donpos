@@ -1,6 +1,6 @@
 import uuid
 
-from sqlalchemy import ForeignKey, Integer, String
+from sqlalchemy import BigInteger, ForeignKey, String
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -13,8 +13,11 @@ class StockMovement(BaseModel):
     product_id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), ForeignKey("products.id"), index=True
     )
-    change: Mapped[int] = mapped_column(Integer)
-    stock_after: Mapped[int] = mapped_column(Integer)
+    outlet_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("outlets.id"), index=True
+    )
+    change: Mapped[int] = mapped_column(BigInteger)
+    stock_after: Mapped[int] = mapped_column(BigInteger)
     reason: Mapped[str] = mapped_column(String(30))
     note: Mapped[str | None] = mapped_column(String(255), nullable=True)
     reference_id: Mapped[uuid.UUID | None] = mapped_column(
